@@ -7,14 +7,14 @@ from pymongo import MongoClient
 import weaviate
 import subprocess
 import time
-from core_functions import (
+from embedder import (
     generate_request_id,
     get_legal_documents,
     create_weaviate_store,
     check_weaviate_data,
-    view_weaviate_data,
-    search_weaviate
+    view_weaviate_data
 )
+from searcher import search_weaviate
 
 def setup_logging():
     log_dir = "logs"
@@ -64,34 +64,31 @@ def start_weaviate():
         if result.stdout:
             logging.info("Weaviate container đã chạy")
             return
-        logging.info("Khởi động Weaviate container...")
+        logging.info("Khởi động Weaviate container bằng docker-compose...")
+        # Chạy docker-compose up
         subprocess.run(
-            [
-                "docker", "run", "-d",
-                "-p", "8080:8080",
-                "-p", "50051:50051",
-                "--name", "weaviate",
-                "cr.weaviate.io/semitechnologies/weaviate:1.26.1"
-            ],
-            check=True
+            ["docker-compose", "up", "-d"],
+            check=True,
+            cwd=os.path.dirname(os.path.abspath(__file__))  # Chạy tại thư mục chứa docker-compose.yml
         )
-        time.sleep(10)  # Tăng thời gian chờ để đảm bảo khởi động
+        time.sleep(15)  # Chờ container khởi động
         logging.info("Weaviate container đã khởi động")
     except subprocess.CalledProcessError as e:
         logging.error(f"Lỗi khi khởi động Weaviate: {e}")
         sys.exit(1)
     except FileNotFoundError:
-        logging.error("Docker không được cài đặt hoặc không tìm thấy. Vui lòng cài đặt Docker.")
+        logging.error("Docker hoặc docker-compose không được cài đặt. Vui lòng cài đặt.")
         sys.exit(1)
 
 def check_weaviate_version():
+    client = None
     try:
         client = weaviate.connect_to_local(host="localhost", port=8080, skip_init_checks=True)
-        # Kiểm tra phiên bản server
+        if not client.is_ready():
+            raise Exception("Weaviate server không sẵn sàng")
         meta = client.get_meta()
         server_version = meta.get("version", "Unknown")
         logging.info(f"Weaviate server version: {server_version}")
-        # Kiểm tra phiên bản client
         client_version = weaviate.__version__
         logging.info(f"Weaviate Python client version: {client_version}")
         return server_version, client_version
@@ -99,18 +96,24 @@ def check_weaviate_version():
         logging.error(f"Lỗi khi kiểm tra phiên bản Weaviate: {e}")
         return None, None
     finally:
-        client.close()
-        
+        if client is not None:
+            client.close()
+
 def main():
     log_file = setup_logging()
     env_vars = load_environment()
-    server_version, client_version = check_weaviate_version()
-    if server_version != "1.26.1":
-        logging.warning(f"Phiên bản Weaviate server ({server_version}) không phải 1.26.1. Đề xuất dùng 1.26.1.")
-    if client_version != "4.9.0":  # Đề xuất client tương thích
-        logging.warning(f"Phiên bản Weaviate client ({client_version}) không phải 4.9.0. Đề xuất dùng 4.9.0.")
-    # Khởi động Weaviate
+    
     start_weaviate()
+    time.sleep(15)
+    
+    server_version, client_version = check_weaviate_version()
+    if server_version is None:
+        logging.error("Không thể kết nối tới Weaviate. Thoát chương trình.")
+        sys.exit(1)
+    if server_version != "1.31.0":
+        logging.warning(f"Phiên bản Weaviate server ({server_version}) không phải 1.31.0. Đề xuất dùng 1.31.0.")
+    if client_version != "4.9.1":
+        logging.warning(f"Phiên bản Weaviate client ({client_version}) không phải 4.9.1. Đề xuất dùng 4.9.1.")
 
     import google.generativeai as genai
     genai.configure(api_key=env_vars['GOOGLE_API_KEY'])

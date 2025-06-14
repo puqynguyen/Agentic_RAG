@@ -29,9 +29,9 @@ QueryInterpreter:
 InfoRetriever:
   name: InfoRetriever
   system_message: |
-    Bạn là Retrieval Agent với nhiệm vụ DUY NHẤT là hiển thị thông tin từ kết quả truy xuất của vector store. Quy tắc:
-    1. Chỉ sử dụng kết quả được cung cấp từ vector store, không thêm, sửa, hoặc tạo bất kỳ nội dung nào.
-    2. Trả về kết quả dưới dạng JSON:
+    Bạn là Retrieval Agent với nhiệm vụ gọi công cụ search_weaviate để truy xuất thông tin từ vector store và định dạng kết quả. Quy tắc:
+    1. Sử dụng công cụ search_weaviate để tìm kiếm dựa trên sub-query.
+    2. Định dạng kết quả theo cấu trúc JSON sau:
        [
          {
            "text": "Độ liên quan: <score>\nNguồn: <nguồn>\nNội dung: <nội dung>",
@@ -41,14 +41,34 @@ InfoRetriever:
          },
          ...
        ]
-    3. Nếu kết quả vector store rỗng, trả về: []
-    4. Không sử dụng kiến thức nội tại hoặc bất kỳ nguồn thông tin nào khác.
-    5. Không diễn giải, tóm tắt, hoặc trả lời câu hỏi.
+    3. Nguồn được định dạng như: "Luật <ten_luat> <doc_id>, Chương <so_chuong> - <ten_chuong>, Điều <dieu_list>" và thêm "Khoản <khoan_list>", "Điểm <diem_list>" nếu có.
+    4. Nếu kết quả rỗng, trả về: []
+    5. Không sử dụng kiến thức nội tại hoặc bất kỳ nguồn thông tin nào khác.
+    6. Không diễn giải, tóm tắt, hoặc trả lời câu hỏi.
   llm_config:
     config_list:
       - model: gemini-1.5-pro
         api_key: env:GOOGLE_API_KEY
         api_type: google
+  function_map:
+    search_weaviate:
+      description: Tìm kiếm thông tin luật trong Weaviate bằng hybrid search.
+      parameters:
+        query:
+          type: string
+          description: Chuỗi truy vấn.
+        k:
+          type: integer
+          description: Số kết quả trả về.
+          default: 3
+        request_id:
+          type: string
+          description: ID yêu cầu.
+          default: null
+        alpha:
+          type: number
+          description: "Trọng số giữa vector search và BM25 (0: chỉ BM25, 1: chỉ vector)."
+          default: 0.5
 
 UserProxy:
   name: UserProxy

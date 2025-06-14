@@ -2,32 +2,20 @@ import json
 import sys
 import uuid
 import logging
+import numpy as np
 import weaviate
 from datetime import datetime
 import google.generativeai as genai
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 import google.api_core.exceptions as google_exceptions
-from numpy import dot
-from numpy.linalg import norm
 import os
 
 def generate_request_id():
-    """Tạo một UUID duy nhất làm request ID.
-    
-    Returns:
-        str: UUID dưới dạng chuỗi.
-    """
+    """Tạo UUID duy nhất làm request ID."""
     return str(uuid.uuid4())
 
 def count_words(text: str) -> int:
-    """Đếm số từ trong một chuỗi văn bản.
-    
-    Args:
-        text (str): Văn bản cần đếm từ.
-    
-    Returns:
-        int: Số từ trong văn bản.
-    """
+    """Đếm số từ trong chuỗi văn bản."""
     return len(text.split())
 
 def process_dieu(dieu, current_chunk, current_word_count, max_words, min_words, doc_id, ten_luat, so_chuong, ten_chuong, so_dieu, ten_dieu, current_dieu_list, current_khoan_list, current_diem_list, texts, chunks_for_json):
@@ -104,23 +92,34 @@ def process_dieu(dieu, current_chunk, current_word_count, max_words, min_words, 
     return current_chunk, current_word_count, current_dieu_list, current_khoan_list, current_diem_list, texts, chunks_for_json
 
 def save_chunk(current_chunk, current_word_count, min_words, doc_id, ten_luat, so_chuong, ten_chuong, current_dieu_list, current_khoan_list, current_diem_list, texts, chunks_for_json):
-    """Lưu chunk vào danh sách."""
+    """Lưu chuỗi văn bản (chunk) vào danh sách."""
     if current_word_count >= min_words:
         chunk_text = current_chunk.strip()
         texts.append(chunk_text)
+        chunk_id = str(uuid.uuid4())
         metadata = {
+            "chunk_id": chunk_id,
             "doc_id": doc_id,
             "ten_luat": ten_luat,
             "so_chuong": so_chuong,
             "ten_chuong": ten_chuong,
             "dieu_list": [str(x) for x in current_dieu_list],
             "khoan_list": [str(x) for x in current_khoan_list],
-            "diem_list": [str(x) for x in current_diem_list]
+            "diem_list": [str(x) for x in current_diem_list],
+            "source_type": "legal_document",
+            "word_count": current_word_count,
+            "keywords": []
         }
+        for field, values in [("dieu_list", metadata["dieu_list"]), ("khoan_list", metadata["khoan_list"]), ("diem_list", metadata["diem_list"])]:
+            for value in values:
+                if not isinstance(value, str):
+                    logging.error(f"Lỗi kiểu dữ liệu trong {field}: Giá trị {value} (type {type(value)}) không phải string")
+                    sys.exit(1)
         chunks_for_json.append({"text": chunk_text, "metadata": metadata})
     return texts, chunks_for_json
 
 def get_legal_documents(client, collection, min_words=100, max_words=200):
+    """Lấy tài liệu pháp lý từ MongoDB và chia thành các chunk."""
     try:
         texts = []
         chunks_for_json = []
@@ -239,34 +238,55 @@ def get_legal_documents(client, collection, min_words=100, max_words=200):
         os.makedirs(json_dir, exist_ok=True)
         json_file = os.path.join(json_dir, f"chunks_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
         try:
-            # Đảm bảo tất cả giá trị trong metadata là string khi lưu JSON
             for chunk in chunks_for_json:
                 chunk["metadata"]["dieu_list"] = [str(x) for x in chunk["metadata"]["dieu_list"]]
                 chunk["metadata"]["khoan_list"] = [str(x) for x in chunk["metadata"]["khoan_list"]]
                 chunk["metadata"]["diem_list"] = [str(x) for x in chunk["metadata"]["diem_list"]]
             with open(json_file, 'w', encoding='utf-8') as f:
                 json.dump(chunks_for_json, f, ensure_ascii=False, indent=2)
-            logging.info(f"Đã lưu {len(chunks_for_json)} chunk vào file JSON: {json_file}")
         except Exception as e:
             logging.error(f"Lỗi khi lưu file JSON: {e}")
             sys.exit(1)
-        for i, chunk in enumerate(texts):
-            word_count = count_words(chunk)
-            if not (min_words <= word_count <= max_words):
-                logging.warning(f"Chunk {i+1} có số từ không hợp lệ: {word_count}")
-            logging.info(f"Chunk {i+1} sample: {chunk[:100]}...")
-        logging.info(f"Đã xử lý {len(texts)} chunk từ {len(documents)} tài liệu")
         return texts, chunks_for_json
     except Exception as e:
         logging.error(f"Lỗi khi lấy dữ liệu: {e}")
         return [], []
-    
+
+def check_vector_compatibility():
+    """Kiểm tra tính tương thích giữa vector trong collection và vector truy vấn."""
+    client = weaviate.connect_to_local()
+    try:
+        collection = client.collections.get("LegalDocument")
+        response = collection.query.fetch_objects(limit=1, include_vector=True)
+        if not response.objects:
+            logging.error("Không có đối tượng nào trong collection LegalDocument")
+            return False
+        obj = response.objects[0]
+        stored_vector = obj.vector.get('default', []) if isinstance(obj.vector, dict) else obj.vector
+        query = "test query"
+        query_embedding = embed_single_text(query, generate_request_id())['embedding']
+        if len(stored_vector) != len(query_embedding):
+            logging.error(f"Vector không tương thích: stored_vector={len(stored_vector)}, query_embedding={len(query_embedding)}")
+            return False
+        stored_norm = np.linalg.norm(np.array(stored_vector))
+        query_norm = np.linalg.norm(np.array(query_embedding))
+        if not np.isclose(stored_norm, 1.0, rtol=1e-5) or not np.isclose(query_norm, 1.0, rtol=1e-5):
+            logging.warning(f"Vector không chuẩn hóa: stored_norm={stored_norm}, query_norm={query_norm}")
+            return False
+        return True
+    except Exception as e:
+        logging.error(f"Lỗi kiểm tra vector: {e}")
+        return False
+    finally:
+        client.close()
+
 @retry(
     stop=stop_after_attempt(5),
     wait=wait_exponential(multiplier=1, min=2, max=10),
     retry=retry_if_exception_type(google_exceptions.InternalServerError)
 )
 def embed_single_text(text: str, request_id: str) -> dict:
+    """Nhúng văn bản thành vector sử dụng Gemini."""
     if not text.strip():
         logging.error(f"[Request {request_id}] Text rỗng, không thể nhúng")
         raise ValueError("Text rỗng")
@@ -278,83 +298,48 @@ def embed_single_text(text: str, request_id: str) -> dict:
     if len(embedding) != 768:
         logging.error(f"[Request {request_id}] Unexpected embedding length {len(embedding)} for text '{text[:50]}...'")
         raise ValueError(f"Embedding length {len(embedding)} != 768")
-    return response
+    embedding_np = np.array(embedding)
+    norm = np.linalg.norm(embedding_np)
+    if not np.isclose(norm, 1.0, rtol=1e-5):
+        logging.warning(f"[Request {request_id}] Vector không chuẩn hóa, norm={norm}. Chuẩn hóa lại.")
+        embedding_np = embedding_np / norm
+        embedding = embedding_np.tolist()
+    return {'embedding': embedding}
 
 def batch_embed_texts(texts: list, batch_size: int = 10) -> list:
-    """Nhúng hàng loạt văn bản thành vector.
-    
-    Args:
-        texts (list): Danh sách văn bản cần nhúng.
-        batch_size (int, optional): Kích thước batch. Mặc định là 10.
-    
-    Returns:
-        list: Danh sách các vector embedding.
-    """
+    """Nhúng hàng loạt văn bản thành vector."""
     embeddings = []
+    texts_valid = []
     request_id = generate_request_id()
     try:
         sample_embedding = embed_single_text("test", request_id)['embedding']
         embedding_dim = len(sample_embedding)
-        logging.info(f"Kích thước embedding: {embedding_dim}")
     except Exception as e:
         logging.error(f"Lỗi khi lấy kích thước embedding: {e}")
         sys.exit(1)
-
     for i in range(0, len(texts), batch_size):
         batch_texts = texts[i:i + batch_size]
         batch_embeddings = []
         for text in batch_texts:
             try:
                 if not text.strip():
-                    logging.warning(f"[Request {request_id}] Text rỗng: {text[:50]}...")
-                    batch_embeddings.append([0] * embedding_dim)
+                    logging.warning(f"[Request {request_id}] Bỏ qua text rỗng: {text[:50]}...")
                     continue
                 response = embed_single_text(text, request_id)
                 embedding = response['embedding']
                 if len(embedding) != embedding_dim:
                     logging.error(f"[Request {request_id}] Embedding không hợp lệ: {text[:50]}... Kích thước: {len(embedding)}")
-                    batch_embeddings.append([0] * embedding_dim)
-                else:
-                    batch_embeddings.append(embedding)
-                    logging.info(f"[Request {request_id}] Nhúng thành công: {text[:50]}... Length: {len(embedding)}")
+                    continue
+                batch_embeddings.append(embedding)
+                texts_valid.append(text)
             except Exception as e:
                 logging.error(f"[Request {request_id}] Lỗi khi nhúng: {text[:50]}...: {e}")
-                batch_embeddings.append([0] * embedding_dim)
+                continue
         embeddings.extend(batch_embeddings)
-        logging.info(f"Đã nhúng batch {i // batch_size + 1}/{len(texts) // batch_size + 1}")
-    return embeddings
-
-def save_chunk(current_chunk, current_word_count, min_words, doc_id, ten_luat, so_chuong, ten_chuong, current_dieu_list, current_khoan_list, current_diem_list, texts, chunks_for_json):
-    """Lưu chunk vào danh sách."""
-    if current_word_count >= min_words:
-        chunk_text = current_chunk.strip()
-        texts.append(chunk_text)
-        chunk_id = str(uuid.uuid4())
-        metadata = {
-            "chunk_id": chunk_id,
-            "doc_id": doc_id,
-            "ten_luat": ten_luat,
-            "so_chuong": so_chuong,
-            "ten_chuong": ten_chuong,
-            "dieu_list": [str(x) for x in current_dieu_list],
-            "khoan_list": [str(x) for x in current_khoan_list],
-            "diem_list": [str(x) for x in current_diem_list],
-            "source_type": "legal_document",
-            "word_count": current_word_count,
-            "keywords": []
-        }
-        # Kiểm tra kiểu dữ liệu
-        for field, values in [("dieu_list", metadata["dieu_list"]), ("khoan_list", metadata["khoan_list"]), ("diem_list", metadata["diem_list"])]:
-            for value in values:
-                if not isinstance(value, str):
-                    logging.error(f"Lỗi kiểu dữ liệu trong {field}: Giá trị {value} (kiểu {type(value)}) không phải string")
-                    logging.error(f"Chunk text: {chunk_text[:200]}...")
-                    logging.error(f"Metadata: {metadata}")
-                    sys.exit(1)
-        chunks_for_json.append({"text": chunk_text, "metadata": metadata})
-    return texts, chunks_for_json
+    return embeddings, texts_valid
 
 def create_weaviate_store(texts: list, chunks_for_json: list):
+    """Tạo và lưu trữ dữ liệu vào Weaviate."""
     client = None
     try:
         import weaviate.classes as wvc
@@ -364,7 +349,6 @@ def create_weaviate_store(texts: list, chunks_for_json: list):
             skip_init_checks=True,
             additional_config=wvc.init.AdditionalConfig(timeout=wvc.init.Timeout(init=30))
         )
-        logging.info("Kết nối thành công với Weaviate")
         schema = {
             "class": "LegalDocument",
             "properties": [
@@ -382,26 +366,37 @@ def create_weaviate_store(texts: list, chunks_for_json: list):
                 {"name": "keywords", "dataType": ["string[]"], "indexFilterable": True, "indexSearchable": True}
             ],
             "vectorizer": "none",
-            "vectorIndexConfig": {"distanceMetric": "cosine"}
+            "vectorIndexConfig": {"distanceMetric": "cosine"},
+            "moduleConfig": {
+                "hybrid": {
+                    "enabled": True
+                }
+            }
         }
-        client.collections.delete("LegalDocument")
+        if client.collections.exists("LegalDocument"):
+            client.collections.delete("LegalDocument")
         client.collections.create_from_dict(schema)
-        logging.info("Đã tạo schema LegalDocument")
-        embeddings = batch_embed_texts(texts)
-        if len(embeddings) != len(texts):
-            logging.error("Số lượng embedding không khớp với số lượng text")
+        embeddings, texts_valid = batch_embed_texts(texts)
+        if len(embeddings) != len(texts_valid):
+            logging.error("Số lượng embedding không khớp với số lượng text hợp lệ")
+            sys.exit(1)
+        chunks_for_json_valid = [
+            chunk for chunk in chunks_for_json if chunk["text"] in texts_valid
+        ]
+        if len(embeddings) != len(chunks_for_json_valid):
+            logging.error("Số lượng embedding không khớp với số lượng chunk hợp lệ")
             sys.exit(1)
         collection = client.collections.get("LegalDocument")
         failed_objects = []
-        for i, chunk_data in enumerate(chunks_for_json):
+        for i, chunk_data in enumerate(chunks_for_json_valid):
             metadata = chunk_data["metadata"]
             for field, values in [("dieu_list", metadata["dieu_list"]), ("khoan_list", metadata["khoan_list"]), ("diem_list", metadata["diem_list"])]:
                 for value in values:
                     if not isinstance(value, str):
-                        logging.error(f"Lỗi kiểu dữ liệu trước khi lưu vào Weaviate trong {field}: Giá trị {value} (kiểu {type(value)}) không phải string")
+                        logging.error(f"Lỗi kiểu dữ liệu trong {field}: Giá trị {value} (type {type(value)}) không phải string")
                         sys.exit(1)
         with collection.batch.dynamic() as batch:
-            for i, (text, chunk_data, embedding) in enumerate(zip(texts, chunks_for_json, embeddings)):
+            for i, (text, chunk_data, embedding) in enumerate(zip(texts_valid, chunks_for_json_valid, embeddings)):
                 try:
                     if not isinstance(embedding, list) or len(embedding) != 768:
                         logging.error(f"Embedding không hợp lệ tại index {i}: Length={len(embedding)}, Type={type(embedding)}")
@@ -423,44 +418,26 @@ def create_weaviate_store(texts: list, chunks_for_json: list):
                         "keywords": [str(x) for x in metadata["keywords"]] if metadata["keywords"] else []
                     }
                     batch.add_object(properties=obj, vector=embedding, uuid=metadata["chunk_id"])
-                    if (i + 1) % 10 == 0:
-                        logging.info(f"Đã lưu {i + 1} đối tượng vào Weaviate")
                 except Exception as e:
                     logging.error(f"Lỗi khi lưu đối tượng {i + 1}: {e}")
                     failed_objects.append({"object": obj, "error": str(e)})
         if failed_objects:
-            logging.error(f"Có {len(failed_objects)} đối tượng không lưu được:")
-            for failed in failed_objects:
-                logging.error(f"Đối tượng thất bại: {failed.get('object', failed.get('index'))}, Lỗi: {failed['error']}")
+            logging.error(f"Có {len(failed_objects)} đối tượng không lưu được")
             sys.exit(1)
-        else:
-            logging.info(f"Đã lưu thành công {len(texts)} đối tượng vào Weaviate")
     except Exception as e:
         logging.error(f"Lỗi khi tạo Weaviate store: {e}")
         sys.exit(1)
     finally:
         if client:
             client.close()
-            logging.info("Đã đóng kết nối Weaviate")
-
 
 def check_weaviate_data():
+    """Kiểm tra dữ liệu trong Weaviate."""
     client = None
     try:
         client = weaviate.connect_to_local()
         collection = client.collections.get("LegalDocument")
         response = collection.query.fetch_objects(limit=10, include_vector=True)
-        logging.info(f"Tổng số đối tượng: {len(response.objects)}")
-        for obj in response.objects:
-            logging.info(f"Chunk ID: {obj.properties['chunk_id']}, Text: {obj.properties['text'][:200]}...")
-            vector = obj.vector
-            if isinstance(vector, dict):
-                # Lấy vector từ dict, giả sử key là 'default' (kiểm tra log Weaviate để xác nhận key)
-                vector = vector.get('default', [])
-            logging.info(f"Vector type: {type(vector)}, Vector length: {len(vector)}")
-            logging.info(f"Vector sample: {vector[:5]}")
-            logging.info(f"Keywords: {obj.properties.get('keywords', [])}")
-            logging.info(f"Dieu list: {obj.properties['dieu_list']}")
         return len(response.objects) > 0
     except Exception as e:
         logging.error(f"Lỗi khi kiểm tra dữ liệu Weaviate: {e}")
@@ -468,7 +445,6 @@ def check_weaviate_data():
     finally:
         if client:
             client.close()
-            logging.info("Đã đóng kết nối Weaviate")
 
 def view_weaviate_data():
     """Hiển thị dữ liệu mẫu từ Weaviate để kiểm tra."""
@@ -487,103 +463,3 @@ def view_weaviate_data():
     finally:
         if client:
             client.close()
-            logging.info("Đã đóng kết nối Weaviate")
-
-# def search_weaviate(client: weaviate.Client, query: str, k: int = 3, request_id: str = None, alpha: float = 0.75) -> list:
-#     try:
-#         collection = client.collections.get("LegalDocument")
-#         response = embed_single_text(query, request_id)
-#         query_embedding = response['embedding']
-#         logging.info(f"[Request {request_id}] Query embedding length: {len(query_embedding)}")
-#         result = collection.query.hybrid(
-#             query=query,
-#             vector=query_embedding,
-#             alpha=alpha,
-#             limit=k,
-#             return_metadata=["distance"]
-#         )
-#         results_list = []
-#         logging.info(f"[Request {request_id}] Query: {query}, Total results: {len(result.objects)}")
-#         for obj in result.objects:
-#             meta = obj.properties
-#             distance = obj.metadata.distance
-#             relevance_score = 1 - distance if distance is not None else 0.0
-#             logging.info(f"[Request {request_id}] Chunk: {meta['chunk_id']}, Distance: {distance}, Score: {relevance_score:.4f}")
-#             results_list.append({
-#                 'text': meta['text'],
-#                 'score': relevance_score,
-#                 'metadata': meta
-#             })
-#         return results_list
-#     except Exception as e:
-#         logging.error(f"[Request {request_id}] Lỗi tìm kiếm: {e}")
-#         return []
-    
-def search_weaviate(client, query, k=3, request_id=None, alpha=0.5):
-    try:
-        collection = client.collections.get("LegalDocument")
-        results_list = []
-        
-        # Thử hybrid query
-        response = embed_single_text(query, request_id)
-        query_embedding = response['embedding']
-        logging.info(f"[Request {request_id}] Query embedding length: {len(query_embedding)}")
-        hybrid_result = collection.query.hybrid(
-            query=query,
-            vector=query_embedding,
-            alpha=alpha,
-            limit=k,
-            return_metadata=["distance", "score", "certainty"]
-        )
-        logging.info(f"[Request {request_id}] Hybrid Query: {query}, Alpha: {alpha}, Total results: {len(hybrid_result.objects)}")
-        for obj in hybrid_result.objects:
-            meta = obj.properties
-            distance = obj.metadata.distance
-            score = obj.metadata.score
-            certainty = obj.metadata.certainty
-            relevance_score = 1 - distance if distance is not None else 0.0
-            logging.info(f"[Request {request_id}] Hybrid Chunk: {meta['chunk_id']}, Distance: {distance}, Score: {score}, Certainty: {certainty}, Relevance: {relevance_score:.4f}")
-            results_list.append({
-                'text': meta['text'],
-                'score': relevance_score,
-                'metadata': meta,
-                'type': 'hybrid'
-            })
-        
-        # Nếu hybrid thất bại, dùng workaround
-        if all(r['score'] == 0 for r in results_list):
-            logging.info(f"[Request {request_id}] Hybrid query không trả về distance, chuyển sang kết hợp BM25 và near_vector")
-            results_list = []
-            bm25_result = collection.query.bm25(
-                query=query,
-                limit=k,
-                return_metadata=["score"]
-            )
-            bm25_scores = {obj.properties['chunk_id']: obj.metadata.score or 0.0 for obj in bm25_result.objects}
-            vector_result = collection.query.near_vector(
-                near_vector=query_embedding,
-                limit=k,
-                return_metadata=["distance"]
-            )
-            vector_scores = {obj.properties['chunk_id']: 1 - (obj.metadata.distance or 0.0) for obj in vector_result.objects}
-            all_chunk_ids = set(bm25_scores.keys()) | set(vector_scores.keys())
-            for chunk_id in all_chunk_ids:
-                bm25_score = bm25_scores.get(chunk_id, 0.0)
-                vector_score = vector_scores.get(chunk_id, 0.0)
-                combined_score = alpha * vector_score + (1 - alpha) * bm25_score
-                obj = next((o for o in bm25_result.objects + vector_result.objects if o.properties['chunk_id'] == chunk_id), None)
-                if obj:
-                    meta = obj.properties
-                    logging.info(f"[Request {request_id}] Combined Chunk: {chunk_id}, BM25: {bm25_score:.4f}, Vector: {vector_score:.4f}, Combined: {combined_score:.4f}")
-                    results_list.append({
-                        'text': meta['text'],
-                        'score': combined_score,
-                        'metadata': meta,
-                        'type': 'combined'
-                    })
-            results_list = sorted(results_list, key=lambda x: x['score'], reverse=True)[:k]
-        
-        return results_list
-    except Exception as e:
-        logging.error(f"[Request {request_id}] Lỗi tìm kiếm: {e}")
-        return []
