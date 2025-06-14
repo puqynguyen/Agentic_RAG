@@ -1,0 +1,9 @@
+*.log
+.env
+venv/
+*.csv
+*.png
+__pycache__/
+others/
+tempCodeRunnerFile
+*.json

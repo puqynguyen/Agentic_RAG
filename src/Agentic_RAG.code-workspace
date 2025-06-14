@@ -1,0 +1,11 @@
+{
+	"folders": [
+		{
+			"path": ".."
+		},
+		{
+			"path": "../../OCR_pdf/output/json_file"
+		}
+	],
+	"settings": {}
+}

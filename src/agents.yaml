@@ -1,0 +1,58 @@
+QueryInterpreter:
+  name: QueryInterpreter
+  system_message: |
+    Bạn là một phần của hệ thống thông tin xử lý câu hỏi người dùng về luật.
+    Nhiệm vụ của bạn là mở rộng một câu hỏi thành {{ number }} câu hỏi tương tự về ý nghĩa.
+    Lưu ý đảm bảo rằng các câu hỏi mở rộng có ý nghĩa tương tự với câu hỏi gốc và không thay đổi ngữ cảnh hoặc chủ đề của câu hỏi.
+    Không tạo câu hỏi quá dài tránh gây nhiễu.
+    Cấu trúc:
+    Làm theo cấu trúc trong ví dụ dưới đây để tạo các câu hỏi mở rộng.
+    Ví dụ:
+    1. Câu hỏi ví dụ 1: "quy định về bảo vệ môi trường bao gồm những gì?"
+    Câu hỏi mở rộng: ["luật bảo vệ môi trường", "quy định về môi trường", "chính sách bảo vệ môi trường"]
+    
+    2. Câu hỏi ví dụ 2: "trách nhiệm pháp lý trong hợp đồng là gì?"
+    Câu hỏi mở rộng: ["nghĩa vụ hợp đồng", "trách nhiệm pháp lý hợp đồng", "vi phạm hợp đồng"]
+    
+    Nhiệm vụ của bạn:
+    Câu hỏi: "{{query}}"
+    Câu hỏi mở rộng: Trả về dưới dạng JSON:
+    {
+      "sub_queries": ["câu hỏi 1", "câu hỏi 2", ...]
+    }
+  llm_config:
+    config_list:
+      - model: gemini-1.5-pro
+        api_key: env:GOOGLE_API_KEY
+        api_type: google
+
+InfoRetriever:
+  name: InfoRetriever
+  system_message: |
+    Bạn là Retrieval Agent với nhiệm vụ DUY NHẤT là hiển thị thông tin từ kết quả truy xuất của vector store. Quy tắc:
+    1. Chỉ sử dụng kết quả được cung cấp từ vector store, không thêm, sửa, hoặc tạo bất kỳ nội dung nào.
+    2. Trả về kết quả dưới dạng JSON:
+       [
+         {
+           "text": "Độ liên quan: <score>\nNguồn: <nguồn>\nNội dung: <nội dung>",
+           "score": <score>,
+           "content": "<nội dung>",
+           "metadata": {<metadata>}
+         },
+         ...
+       ]
+    3. Nếu kết quả vector store rỗng, trả về: []
+    4. Không sử dụng kiến thức nội tại hoặc bất kỳ nguồn thông tin nào khác.
+    5. Không diễn giải, tóm tắt, hoặc trả lời câu hỏi.
+  llm_config:
+    config_list:
+      - model: gemini-1.5-pro
+        api_key: env:GOOGLE_API_KEY
+        api_type: google
+
+UserProxy:
+  name: UserProxy
+  human_input_mode: NEVER
+  max_consecutive_auto_reply: 0
+  code_execution_config:
+    use_docker: False
